@@ -1,9 +1,6 @@
 local TweenService = game:GetService("TweenService")
 local TSPlus = {}
 
-local activeQueues = {}
-setmetatable(activeQueues, {__mode = "k"})
-
 local TAG_PATTERN = "(<[^>]+>)|([\1-\127\194-\244][\128-\191]*)"
 
 local function getSegments(text)
@@ -23,14 +20,15 @@ local function applyTypewriter(segments, ratio)
     local result = ""
     local threshold = math.floor(segments.totalChars * ratio)
     local currentCount = 0
-
     for _, seg in ipairs(segments) do
         if seg.isTag then
             result ..= seg.content
         else
-            if currentCount >= threshold then break end
-            result ..= seg.content
-            currentCount += 1
+            local take = math.min(#seg.content, math.max(0, threshold - currentCount))
+            if take > 0 then
+                result ..= string.sub(seg.content, 1, take)
+                currentCount += take
+            end
         end
     end
     return result
@@ -50,11 +48,10 @@ function TSPlus:Create(object, info, goals)
     end
 
     local mainTween = TweenService:Create(object, actualInfo, otherGoals)
-    
-    if textGoal == nil or not (object:IsA("TextLabel") or object:IsA("TextButton")) then
-        return mainTween
-    end
+    if textGoal == nil then return mainTween end
 
+    -- Setup Custom Signals
+    local completedEvent = Instance.new("BindableEvent")
     local progress = Instance.new("NumberValue")
     local segments = getSegments(textGoal)
     local textTween = TweenService:Create(progress, actualInfo, {Value = 1})
@@ -68,32 +65,43 @@ function TSPlus:Create(object, info, goals)
     local function cleanup()
         if connection then connection:Disconnect(); connection = nil end
         textTween:Cancel()
+        mainTween:Cancel()
         progress:Destroy()
     end
 
-    local tweenProxy = {
-        Instance = mainTween,
-        PlaybackState = mainTween.PlaybackState,
-        Completed = mainTween.Completed
+    -- Wrapper logic
+    local proxy = {
+        Completed = completedEvent.Event,
+        Instance = mainTween
     }
 
-    function tweenProxy:Play()
+    function proxy:Play()
+        -- Trigger awal agar tidak kosong di frame pertama
+        object.Text = ""
         progress.Value = 0
+        
+        local completedCount = 0
+        local function checkDone()
+            completedCount += 1
+            if completedCount >= 1 then -- Sinergi antara text dan main tween
+                cleanup()
+                object.Text = textGoal
+                completedEvent:Fire(Enum.PlaybackState.Completed)
+            end
+        end
+
+        mainTween.Completed:Connect(checkDone)
+        
         textTween:Play()
         mainTween:Play()
     end
 
-    function tweenProxy:Cancel()
+    function proxy:Cancel()
         cleanup()
-        mainTween:Cancel()
+        completedEvent:Fire(Enum.PlaybackState.Cancelled)
     end
 
-    mainTween.Completed:Connect(function()
-        cleanup()
-        object.Text = textGoal
-    end)
-
-    return tweenProxy
+    return proxy
 end
 
 function TSPlus:PlayQueue(object, queueList, defaultConfig)
