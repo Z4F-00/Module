@@ -1,0 +1,142 @@
+local TweenService = game:GetService("TweenService")
+local TSPlus = {}
+
+local activeQueues = {}
+setmetatable(activeQueues, {__mode = "k"}) 
+
+local TAG_PATTERN = "(<[^>]+>)|([^<]+)"
+
+local function getSegments(text)
+    local segments = {totalChars = 0}
+    for tag, plain in text:gmatch(TAG_PATTERN) do
+        local isTag = tag ~= nil
+        local content = tag or plain
+        if not isTag then segments.totalChars += #content end
+        table.insert(segments, {content = content, isTag = isTag})
+    end
+    return segments
+end
+
+local function applyTypewriter(segments, ratio)
+    local result = ""
+    local threshold = math.floor(segments.totalChars * ratio)
+    local currentCount = 0
+
+    for _, seg in ipairs(segments) do
+        if seg.isTag then
+            result ..= seg.content
+        else
+            local remaining = threshold - currentCount
+            if remaining <= 0 then break end
+            local length = math.min(#seg.content, remaining)
+            result ..= string.sub(seg.content, 1, length)
+            currentCount += length
+        end
+    end
+    return result
+end
+
+function TSPlus:Create(object, info, goals)
+    local actualInfo = typeof(info) == "table" and TweenInfo.new(
+        info.Time or 1,
+        Enum.EasingStyle[info.Style or "Linear"],
+        Enum.EasingDirection[info.Direction or "Out"]
+    ) or info
+
+    local textGoal = goals.Text
+    local otherGoals = {}
+    for prop, val in pairs(goals) do
+        if prop ~= "Text" then otherGoals[prop] = val end
+    end
+
+    local mainTween = TweenService:Create(object, actualInfo, otherGoals)
+
+    if textGoal and (object:IsA("TextLabel") or object:IsA("TextButton")) then
+        object.RichText = true
+        local segments = getSegments(textGoal)
+        local progress = Instance.new("NumberValue")
+        local textTween = TweenService:Create(progress, actualInfo, {Value = 1})
+
+        local conn = progress.Changed:Connect(function()
+            object.Text = applyTypewriter(segments, progress.Value)
+        end)
+
+        local function cleanup()
+            if conn then conn:Disconnect(); conn = nil end
+            if progress then progress:Destroy(); progress = nil end
+            if textTween then textTween:Cancel(); textTween = nil end
+        end
+
+        mainTween.Completed:Connect(function()
+            cleanup()
+            object.Text = textGoal
+        end)
+
+        local originalPlay = mainTween.Play
+        mainTween.Play = function(self)
+            textTween:Play()
+            originalPlay(self)
+        end
+        
+        local originalCancel = mainTween.Cancel
+        mainTween.Cancel = function(self)
+            cleanup()
+            originalCancel(self)
+        end
+    end
+
+    return mainTween
+end
+
+function TSPlus:PlayQueue(object, queueList, defaultConfig)
+	defaultConfig = defaultConfig or {}
+	
+	if activeQueues[object] then
+		activeQueues[object].cancelled = true
+	end
+
+	local session = { cancelled = false }
+	activeQueues[object] = session
+
+	task.spawn(function()
+		for i, item in ipairs(queueList) do
+			if session.cancelled then break end
+
+			local info = {
+				Time = item.Time or defaultConfig.Time or 1,
+				Style = item.Style or defaultConfig.Style or "Linear",
+				Direction = item.Direction or defaultConfig.Direction or "Out"
+			}
+			
+			local goals = {Text = item.Text}
+			if item.TextColor3 then goals.TextColor3 = item.TextColor3 end
+
+			local tween = self:Create(object, info, goals)
+			tween:Play()
+			
+			local completed = false
+			local conn = tween.Completed:Connect(function() completed = true end)
+			
+			while not completed and not session.cancelled do
+				task.wait()
+			end
+			
+			conn:Disconnect()
+			if session.cancelled then 
+				tween:Cancel()
+				break 
+			end
+			
+			local totalDelay = item.Delay or defaultConfig.Delay or 0
+			if totalDelay > 0 then
+				task.wait(totalDelay)
+			end
+		end
+		
+		if activeQueues[object] == session then
+			activeQueues[object] = nil
+		end
+	end)
+end
+
+return TSPlus
